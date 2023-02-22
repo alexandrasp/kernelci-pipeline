@@ -1,0 +1,119 @@
+{# -*- mode: Python -*- -#}
+{# SPDX-License-Identifier: LGPL-2.1-or-later -#}
+
+{%- extends 'base/python.jinja2' %}
+
+{%- block python_imports %}
+{{ super() }}
+import os
+import subprocess
+import requests
+import shutil
+{%- endblock %}
+
+{%- block python_globals %}
+{{ super() }}
+ROOTFS_URL = 'https://storage.staging.kernelci.org/images/rootfs/debian/bookworm/alex-09022023.1/amd64/rootfs.cpio.gz'
+{% endblock %}
+
+{% block python_job -%}
+class Virtio():
+    """Base class to handle the setup and running for virtio"""
+
+    def kernel_config(self, kdir):
+        try:
+            os.chdir(kdir)
+            cmd = ['make defconfig', 
+                    'echo \"CONFIG_VHOST=y\" >> .config', 
+                    'echo \"CONFIG_VHOST_NET=y\" >> .config']
+            separator = ' && '
+            subprocess.run(separator.join(cmd), shell=True).returncode
+            return True
+        except Exception as e:
+            print("Kernel config error:", e)
+            return False
+
+    def kernel_build(self, kdir):
+        try:
+            os.chdir(kdir)
+            cmd = ['make']
+            subprocess.run(cmd, shell=True).returncode
+            return True
+        except Exception as e:
+            print("Kernel build error:", e)
+            return False
+
+    def virtio_build(self, kdir):
+        try:
+            os.chdir(kdir)
+            cmd = ['cd tools/virtio',
+                    'make']
+            separator = ' && '
+            subprocess.run(separator.join(cmd), shell=True).returncode
+        except Exception as e:
+            print("Virtio build error:", e)
+            return False
+
+    def package_virtio(self, kdir):
+        try:
+            os.chdir('/tmp/kci/')
+            print('Getting rootfs image..')
+            with requests.get(ROOTFS_URL, stream = True) as r:
+                r.raise_for_status()
+                with open('rootfs.cpio.gz', 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            cmd = ['mkdir temp_folder']
+            subprocess.run(cmd, shell=True).returncode
+            uncompress = f"gunzip -c rootfs.cpio.gz | sh -c 'cd temp_folder/&& cpio -i'"
+            copying = f"cp -R {kdir}/tools/virtio/ /tmp/kci/temp_folder"
+            compress= f"sh -c 'cd temp_folder/ && find . | cpio -H newc -o' | gzip -9 > virtio_rootfs.cpio.gz"
+            subprocess.run(uncompress, shell=True).returncode
+            subprocess.run(copying, shell=True).returncode
+            subprocess.run(compress, shell=True).returncode
+            return True
+        except Exception as e:
+            print("Packaging virtio error:", e)
+            return False
+
+    def run_virtio(self):
+        """Here we suppose to have a bundle of commands to run virtio
+        locally it is possible to run the tests by calling a qemu VM.
+        E.g. qemu-system-x86_64 -kernel /tmp/kci/linux-6.0.19/arch/x86_64/boot/bzImage 
+        -initrd /tmp/kci/virtio_rootfs.cpio.gz -enable-kvm -nographic -append 
+        "console=ttyS0" -m8
+        So, it will boot the VM, but after we need to load/install virtio modules
+        and finally run the tests."""
+
+class Job(BaseJob):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if os.path.exists(self._workspace):
+            shutil.rmtree(self._workspace)
+
+    def _run(self, src_path):
+        results = {
+            'node': {
+                'name': 'virtio',
+                'result': 'pass',
+                'state': 'done',
+            },
+            'child_nodes':[],
+        }
+        try:
+            test = Virtio()
+            test.kernel_config(src_path)
+            test.kernel_build(src_path)
+            test.virtio_build(src_path)
+            test.package_virtio(src_path)
+            #to do running and parsing results
+        except Exception as e:
+            print(f"Exception raised while running/parsing tests: {e}")
+            results['node']['result'] = 'fail'
+            return results
+        return results 
+        
+    def _submit(self, results, node_id, db):
+        pass
+{% endblock %}
+
